@@ -54,6 +54,59 @@ def make_meta(clip_id, url, title, author, category, tags, clip_type, clip_dir, 
     return meta
 
 
+def generate_obsidian_index():
+    """Generate _INDEX.md and _TAGS.md for Obsidian navigation."""
+    index = load_index()
+    clips = index["clips"]
+    tags_map = {}
+    now = datetime.now(CST).strftime("%Y-%m-%d %H:%M")
+
+    # _INDEX.md
+    cats = {}
+    for c in clips:
+        cat = c.get("category", "uncategorized")
+        cats.setdefault(cat, []).append(c)
+        for t in c.get("tags", []):
+            tags_map.setdefault(t, []).append(c)
+
+    lines = [f"# 📚 Clips Index\n", f"_Last updated: {now}_\n", f"Total: {len(clips)} clips\n"]
+    for cat in sorted(cats.keys()):
+        lines.append(f"\n## {cat}\n")
+        for c in sorted(cats[cat], key=lambda x: x.get("clipped_at", ""), reverse=True):
+            date = c.get("clipped_at", "")[:10]
+            title = c.get("title", "Untitled")
+            path = c.get("path", "")
+            author = c.get("author") or ""
+            status = " ⚠️" if c.get("status") == "fetch_failed" else ""
+            author_str = f" — {author}" if author else ""
+            lines.append(f"- [{title}]({path}/content.md){author_str} `{date}`{status}")
+    (CLIPS_DIR / "_INDEX.md").write_text("\n".join(lines) + "\n")
+
+    # _TAGS.md
+    tlines = [f"# 🏷️ Tags\n", f"_Last updated: {now}_\n"]
+    for tag in sorted(tags_map.keys()):
+        tlines.append(f"\n## #{tag}\n")
+        for c in tags_map[tag]:
+            date = c.get("clipped_at", "")[:10]
+            title = c.get("title", "Untitled")
+            path = c.get("path", "")
+            tlines.append(f"- [{title}]({path}/content.md) `{date}`")
+    (CLIPS_DIR / "_TAGS.md").write_text("\n".join(tlines) + "\n")
+
+
+def git_auto_push(message="auto: new clip"):
+    """Auto commit and push clips to GitHub for Obsidian sync."""
+    if not (CLIPS_DIR / ".git").exists():
+        return
+    try:
+        subprocess.run(["git", "add", "-A"], cwd=str(CLIPS_DIR), timeout=10)
+        subprocess.run(["git", "commit", "-m", message, "--allow-empty"],
+                       cwd=str(CLIPS_DIR), timeout=10, capture_output=True)
+        subprocess.run(["git", "push"], cwd=str(CLIPS_DIR), timeout=30, capture_output=True)
+    except Exception:
+        pass  # Non-critical, don't break clip flow
+
+
 def save_clip_meta(meta, clip_dir):
     """Save meta.json and update index."""
     (clip_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
@@ -61,6 +114,8 @@ def save_clip_meta(meta, clip_dir):
     update_known_tags(index, meta.get("tags"))
     index["clips"].append(meta)
     save_index(index)
+    generate_obsidian_index()
+    git_auto_push(f"clip: {meta.get('title', 'untitled')}")
     print(json.dumps(meta, ensure_ascii=False, indent=2))
 
 
