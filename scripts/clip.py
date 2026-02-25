@@ -10,6 +10,8 @@ CST = timezone(timedelta(hours=8))
 CLIPS_DIR = Path(os.environ.get("CLIPS_DIR", os.path.expanduser("~/.openclaw/workspace/clips")))
 INDEX_FILE = CLIPS_DIR / "index.json"
 WHISPER_BIN = os.path.expanduser("~/.openclaw/workspace/.venv/bin/whisper")
+VENV_PYTHON = os.path.expanduser("~/.openclaw/workspace/.venv/bin/python3")
+CHROME_BIN = "/home/xiemingsi/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
 
 
 def slugify(text, max_len=60):
@@ -30,7 +32,6 @@ def save_index(index):
 
 
 def update_known_tags(index, tags):
-    """Merge new tags into known_tags for reuse."""
     known = set(index.get("known_tags", []))
     known.update(tags or [])
     index["known_tags"] = sorted(known)
@@ -39,16 +40,10 @@ def update_known_tags(index, tags):
 def make_meta(clip_id, url, title, author, category, tags, clip_type, clip_dir, **extra):
     now = datetime.now(CST)
     meta = {
-        "id": clip_id,
-        "url": url,
-        "title": title or clip_id,
-        "author": author,
-        "category": category,
-        "tags": tags or [],
-        "clipped_at": now.isoformat(),
-        "type": clip_type,
-        "path": str(clip_dir.relative_to(CLIPS_DIR)),
-        "status": "ok",
+        "id": clip_id, "url": url, "title": title or clip_id,
+        "author": author, "category": category, "tags": tags or [],
+        "clipped_at": now.isoformat(), "type": clip_type,
+        "path": str(clip_dir.relative_to(CLIPS_DIR)), "status": "ok",
     }
     meta.update(extra)
     return meta
@@ -61,7 +56,6 @@ def generate_obsidian_index():
     tags_map = {}
     now = datetime.now(CST).strftime("%Y-%m-%d %H:%M")
 
-    # _INDEX.md
     cats = {}
     for c in clips:
         cat = c.get("category", "uncategorized")
@@ -76,13 +70,11 @@ def generate_obsidian_index():
             date = c.get("clipped_at", "")[:10]
             title = c.get("title", "Untitled")
             path = c.get("path", "")
-            author = c.get("author") or ""
+            author = f" — {c['author']}" if c.get("author") else ""
             status = " ⚠️" if c.get("status") == "fetch_failed" else ""
-            author_str = f" — {author}" if author else ""
-            lines.append(f"- [{title}]({path}/content.md){author_str} `{date}`{status}")
+            lines.append(f"- [{title}]({path}/content.md){author} `{date}`{status}")
     (CLIPS_DIR / "_INDEX.md").write_text("\n".join(lines) + "\n")
 
-    # _TAGS.md
     tlines = [f"# 🏷️ Tags\n", f"_Last updated: {now}_\n"]
     for tag in sorted(tags_map.keys()):
         tlines.append(f"\n## #{tag}\n")
@@ -104,11 +96,11 @@ def git_auto_push(message="auto: new clip"):
                        cwd=str(CLIPS_DIR), timeout=10, capture_output=True)
         subprocess.run(["git", "push"], cwd=str(CLIPS_DIR), timeout=30, capture_output=True)
     except Exception:
-        pass  # Non-critical, don't break clip flow
+        pass
 
 
 def save_clip_meta(meta, clip_dir):
-    """Save meta.json and update index."""
+    """Save meta.json, update index, generate Obsidian files, push to git."""
     (clip_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
     index = load_index()
     update_known_tags(index, meta.get("tags"))
@@ -120,12 +112,10 @@ def save_clip_meta(meta, clip_dir):
 
 
 def resolve_category(clip_type, subcategory=None):
-    """Map type to top-level folder, with optional subcategory."""
-    type_map = {"article": "articles", "video": "Media/videos", "audio": "Media/Audio", "podcast": "Media/Audio", "image": "Media/pics", "game": "Media/Games"}
+    type_map = {"article": "articles", "video": "Media/videos", "audio": "Media/Audio",
+                "podcast": "Media/Audio", "image": "Media/pics", "game": "Media/Games"}
     base = type_map.get(clip_type, "articles")
-    if subcategory:
-        return f"{base}/{subcategory}"
-    return base
+    return f"{base}/{subcategory}" if subcategory else base
 
 
 def make_clip_dir(category, title):
@@ -138,28 +128,48 @@ def make_clip_dir(category, title):
 
 
 def is_blocked_html(html):
-    """Detect Cloudflare challenges, CAPTCHAs, and other anti-bot pages."""
-    markers = [
-        '<title>Just a moment...</title>',
-        'challenge-platform',
-        'cf_chl_opt',
-        'Performing security verification',
-        'Enable JavaScript and cookies to continue',
-        'Attention Required! | Cloudflare',
-        'cf-browser-verification',
-        'hCaptcha',
-    ]
+    markers = ['<title>Just a moment...</title>', 'challenge-platform', 'cf_chl_opt',
+               'Performing security verification', 'Enable JavaScript and cookies to continue',
+               'Attention Required! | Cloudflare', 'cf-browser-verification', 'hCaptcha']
     return any(m in html for m in markers)
 
 
-def fetch_with_stealth_browser(url, html_file, body_file=None):
-    """Fetch a page using Xvfb + undetected-chromedriver to bypass Cloudflare."""
-    VENV_PYTHON = os.path.expanduser("~/.openclaw/workspace/.venv/bin/python3")
-    CHROME_BIN = "/home/xiemingsi/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
+def html_to_markdown(html, url=None):
+    """Convert HTML to well-formatted markdown using markdownify + BeautifulSoup."""
+    try:
+        sys.path.insert(0, os.path.expanduser("~/.openclaw/workspace/.venv/lib/python3.14/site-packages"))
+        from bs4 import BeautifulSoup
+        from markdownify import markdownify as md
 
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Remove non-content elements
+        for tag in soup.find_all(["nav", "header", "footer", "script", "style", "noscript",
+                                   "iframe", "svg", "form"]):
+            tag.decompose()
+        for tag in soup.find_all(class_=re.compile(r"nav|menu|sidebar|footer|header|comment|ad-|ads-|banner")):
+            tag.decompose()
+
+        # Try to find article content
+        article = (soup.find("article") or soup.find(class_=re.compile(r"post-content|article|entry-content|content-body"))
+                   or soup.find("main") or soup.body or soup)
+
+        result = md(str(article), heading_style="ATX", code_language_callback=lambda el: "",
+                    strip=["img"] if not article.find("img") else [])
+
+        # Clean up excessive blank lines
+        result = re.sub(r'\n{4,}', '\n\n\n', result)
+        return result.strip()
+    except Exception as e:
+        return f"<!-- html_to_markdown failed: {e} -->\n" + html[:5000]
+
+
+def fetch_with_stealth_browser(url, html_file, screenshot_file=None):
+    """Fetch page using Xvfb + undetected-chromedriver, with optional full-page screenshot."""
     if not Path(VENV_PYTHON).exists() or not Path(CHROME_BIN).exists():
         return False
 
+    sc_path = str(screenshot_file) if screenshot_file else "/dev/null"
     script = f'''
 import sys, time, os, subprocess
 xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1920x1080x24"],
@@ -182,18 +192,20 @@ try:
         time.sleep(2)
     with open("{html_file}", "w") as f:
         f.write(driver.page_source)
-    body = driver.find_element("tag name", "body").text
-    with open("{body_file or str(html_file).replace('.html', '_body.txt')}", "w") as f:
-        f.write(body)
+    sc = "{sc_path}"
+    if sc != "/dev/null":
+        total_h = driver.execute_script("return document.body.scrollHeight")
+        driver.set_window_size(1920, min(total_h + 200, 32000))
+        time.sleep(1)
+        driver.save_screenshot(sc)
     driver.quit()
 except Exception as e:
-    print(f"stealth fetch error: {{e}}", file=sys.stderr)
+    print(f"stealth error: {{e}}", file=sys.stderr)
 finally:
     xvfb.terminate()
 '''
     try:
-        ret = subprocess.run([VENV_PYTHON, "-c", script],
-                             timeout=120, capture_output=True, text=True)
+        subprocess.run([VENV_PYTHON, "-c", script], timeout=120, capture_output=True)
         if html_file.exists() and html_file.stat().st_size > 500:
             html = html_file.read_text(errors='replace')
             if not is_blocked_html(html):
@@ -203,60 +215,93 @@ finally:
     return False
 
 
+def download_images(html, clip_dir, url):
+    """Download images from HTML and return mapping of remote→local paths."""
+    img_dir = clip_dir / "images"
+    img_urls = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html)
+    downloaded = {}
+    if not img_urls:
+        return downloaded
+    img_dir.mkdir(exist_ok=True)
+    for i, img_url in enumerate(img_urls[:50]):
+        if img_url.startswith('data:'):
+            continue
+        if img_url.startswith('//'):
+            img_url = 'https:' + img_url
+        elif img_url.startswith('/'):
+            p = urlparse(url)
+            img_url = f"{p.scheme}://{p.netloc}{img_url}"
+        ext = (Path(urlparse(img_url).path).suffix or '.jpg').split('?')[0][:5]
+        img_name = f"img_{i:03d}{ext}"
+        try:
+            subprocess.run(["curl", "-sL", "-o", str(img_dir / img_name), img_url],
+                           timeout=30, check=True)
+            downloaded[img_url] = f"images/{img_name}"
+        except Exception:
+            pass
+    return downloaded
+
+
 def clip_article(url, title=None, category="articles", tags=None, author=None, source=None):
+    """Clip an article: fetch HTML, convert to markdown, download images, take screenshot."""
     if source:
         category = f"{category}/{source}"
     clip_id, clip_dir = make_clip_dir(category, title)
     html_file = clip_dir / "raw.html"
+    screenshot_file = clip_dir / "screenshot.png"
 
-    # Download HTML
-    ret = subprocess.run(["curl", "-sL", "-o", str(html_file), url], timeout=60)
-    if ret.returncode != 0 or not html_file.exists() or html_file.stat().st_size < 100:
-        meta = make_meta(clip_id, url, title, author, category, tags, "article", clip_dir,
-                         status="fetch_failed", fail_reason="curl failed or empty response")
-        save_clip_meta(meta, clip_dir)
-        return meta
+    # Step 1: Try curl
+    subprocess.run(["curl", "-sL", "-o", str(html_file), url], timeout=60)
+    curl_ok = html_file.exists() and html_file.stat().st_size > 100
 
-    html = html_file.read_text(errors='replace')
+    if curl_ok:
+        html = html_file.read_text(errors='replace')
+        if is_blocked_html(html):
+            curl_ok = False
 
-    # Detect anti-bot pages — try stealth browser fallback
-    if is_blocked_html(html):
-        body_file = clip_dir / "body.txt"
-        if fetch_with_stealth_browser(url, html_file, body_file):
-            html = html_file.read_text(errors='replace')
-            # Successfully bypassed — continue with normal flow
-        else:
+    # Step 2: If curl failed, try stealth browser (with screenshot)
+    if not curl_ok:
+        if not fetch_with_stealth_browser(url, html_file, screenshot_file):
             meta = make_meta(clip_id, url, title, author, category, tags, "article", clip_dir,
-                             status="fetch_failed", fail_reason="Blocked by anti-bot (Cloudflare/CAPTCHA) — stealth browser also failed")
+                             status="fetch_failed", fail_reason="All fetch methods failed")
             save_clip_meta(meta, clip_dir)
             return meta
+        html = html_file.read_text(errors='replace')
+    else:
+        # curl succeeded — still take screenshot for visual reference if stealth browser available
+        fetch_with_stealth_browser(url, Path("/dev/null"), screenshot_file)
 
-    # Download images
-    img_dir = clip_dir / "images"
-    img_urls = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html)
-    downloaded = {}
-    if img_urls:
-        img_dir.mkdir(exist_ok=True)
-        for i, img_url in enumerate(img_urls[:50]):
-            if img_url.startswith('data:'):
-                continue
-            if img_url.startswith('//'):
-                img_url = 'https:' + img_url
-            elif img_url.startswith('/'):
-                p = urlparse(url)
-                img_url = f"{p.scheme}://{p.netloc}{img_url}"
-            ext = (Path(urlparse(img_url).path).suffix or '.jpg').split('?')[0][:5]
-            img_name = f"img_{i:03d}{ext}"
-            try:
-                subprocess.run(["curl", "-sL", "-o", str(img_dir / img_name), img_url], timeout=30, check=True)
-                downloaded[img_url] = f"images/{img_name}"
-            except Exception:
-                pass
+    # Step 3: Download images
+    downloaded = download_images(html, clip_dir, url)
 
-    content_size = html_file.stat().st_size
-    images_size = sum(f.stat().st_size for f in img_dir.glob("*")) if img_dir.exists() else 0
+    # Step 4: Convert HTML to markdown
+    markdown = html_to_markdown(html, url)
+
+    # Replace remote image URLs with local paths in markdown
+    for remote, local in downloaded.items():
+        markdown = markdown.replace(remote, local)
+
+    # Step 5: Write content.md with YAML frontmatter
+    now = datetime.now(CST)
+    frontmatter = f"""---
+title: "{(title or clip_id).replace('"', '\\"')}"
+url: {url}
+author: {author or 'unknown'}
+clipped_at: {now.isoformat()}
+tags: [{', '.join(tags or [])}]
+source: {source or ''}
+---
+
+"""
+    (clip_dir / "content.md").write_text(frontmatter + markdown)
+
+    content_size = (clip_dir / "content.md").stat().st_size
+    images_size = sum(f.stat().st_size for f in (clip_dir / "images").glob("*")) if (clip_dir / "images").exists() else 0
+    has_screenshot = screenshot_file.exists() and screenshot_file.stat().st_size > 0
+
     meta = make_meta(clip_id, url, title, author, category, tags, "article", clip_dir,
-                     content_size=content_size, images_count=len(downloaded), images_size=images_size)
+                     content_size=content_size, images_count=len(downloaded),
+                     images_size=images_size, has_screenshot=has_screenshot)
     if source:
         meta["source"] = source
     save_clip_meta(meta, clip_dir)
@@ -269,9 +314,9 @@ def clip_media(url, title=None, category=None, tags=None, author=None, media_typ
         category = resolve_category(media_type)
     clip_id, clip_dir = make_clip_dir(category, title)
 
-    # Get info
     try:
-        r = subprocess.run(["yt-dlp", "--dump-json", "--no-download", url], capture_output=True, text=True, timeout=60)
+        r = subprocess.run(["yt-dlp", "--dump-json", "--no-download", url],
+                           capture_output=True, text=True, timeout=60)
         if r.returncode == 0:
             info = json.loads(r.stdout)
             title = title or info.get("title")
@@ -279,26 +324,27 @@ def clip_media(url, title=None, category=None, tags=None, author=None, media_typ
     except Exception:
         pass
 
-    # Download
     out_tpl = str(clip_dir / "%(title).80s.%(ext)s")
     if media_type in ("audio", "podcast"):
         cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--write-thumbnail", "-o", out_tpl, url]
     else:
-        cmd = ["yt-dlp", "-f", "best[height<=1080]", "--write-thumbnail", "--write-subs", "--sub-langs", "zh.*,en.*", "-o", out_tpl, url]
+        cmd = ["yt-dlp", "-f", "best[height<=1080]", "--write-thumbnail",
+               "--write-subs", "--sub-langs", "zh.*,en.*", "-o", out_tpl, url]
 
     ret = subprocess.run(cmd, timeout=600)
     if ret.returncode != 0:
-        # Fallback: try direct curl
         ext = "mp3" if media_type in ("audio", "podcast") else "mp4"
         subprocess.run(["curl", "-sL", "-o", str(clip_dir / f"media.{ext}"), url], timeout=300)
 
     total_size = sum(f.stat().st_size for f in clip_dir.rglob("*") if f.is_file())
     if total_size == 0:
-        meta = make_meta(clip_id, url, title, author, category, tags, media_type, clip_dir, status="fetch_failed")
+        meta = make_meta(clip_id, url, title, author, category, tags, media_type, clip_dir,
+                         status="fetch_failed")
         save_clip_meta(meta, clip_dir)
         return meta
 
-    meta = make_meta(clip_id, url, title, author, category, tags, media_type, clip_dir, content_size=total_size)
+    meta = make_meta(clip_id, url, title, author, category, tags, media_type, clip_dir,
+                     content_size=total_size)
     save_clip_meta(meta, clip_dir)
     return meta
 
@@ -311,14 +357,12 @@ def transcribe(clip_path):
         print(json.dumps({"error": "no audio file found"}))
         return
     audio = audio_files[0]
-    out_dir = str(clip_dir)
-    cmd = [WHISPER_BIN, str(audio), "--model", "small", "--language", "zh", "--output_dir", out_dir, "--output_format", "txt"]
+    cmd = [WHISPER_BIN, str(audio), "--model", "small", "--language", "zh",
+           "--output_dir", str(clip_dir), "--output_format", "txt"]
     subprocess.run(cmd, check=True, timeout=1200)
-    # Rename output to transcript.md
     txt_files = list(clip_dir.glob("*.txt"))
     if txt_files:
         txt_files[0].rename(clip_dir / "transcript.md")
-    # Update meta
     meta_file = clip_dir / "meta.json"
     if meta_file.exists():
         meta = json.loads(meta_file.read_text())
@@ -342,13 +386,10 @@ def list_clips(category=None, tag=None, content_type=None, limit=20):
 
 
 def list_tags():
-    index = load_index()
-    tags = index.get("known_tags", [])
-    print(json.dumps(tags, ensure_ascii=False))
+    print(json.dumps(load_index().get("known_tags", []), ensure_ascii=False))
 
 
 def list_subcategories(base="articles"):
-    """List existing subcategories under a base folder."""
     base_dir = CLIPS_DIR / base
     if not base_dir.exists():
         print("[]")
@@ -361,32 +402,27 @@ def main():
     p = argparse.ArgumentParser(description="Web Clipper")
     sub = p.add_subparsers(dest="command")
 
-    # clip
     cp = sub.add_parser("clip")
     cp.add_argument("url")
     cp.add_argument("--type", choices=["article", "video", "audio", "podcast", "image"], default="article")
     cp.add_argument("--title")
     cp.add_argument("--category")
-    cp.add_argument("--subcategory", help="Subfolder under base category (e.g. 微信公众号-xxx, VPS)")
+    cp.add_argument("--subcategory", help="Subfolder under base category")
     cp.add_argument("--tags", nargs="*", default=[])
     cp.add_argument("--author")
-    cp.add_argument("--source", help="Content source (e.g. 微信公众号-xxx)")
+    cp.add_argument("--source", help="Content source (e.g. NodeSeek)")
 
-    # transcribe
     tp = sub.add_parser("transcribe")
-    tp.add_argument("clip_path", help="Relative path from clips root")
+    tp.add_argument("clip_path")
 
-    # list
     lp = sub.add_parser("list")
     lp.add_argument("--category")
     lp.add_argument("--tag")
     lp.add_argument("--type")
     lp.add_argument("--limit", type=int, default=20)
 
-    # tags
-    sub.add_parser("tags", help="List known tags for reuse")
+    sub.add_parser("tags")
 
-    # subcategories
     sp = sub.add_parser("subcategories")
     sp.add_argument("--base", default="articles")
 
